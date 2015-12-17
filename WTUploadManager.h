@@ -14,17 +14,12 @@ typedef enum {
     WTUploadStatueFailed
 }WTUploadStatue;
 
-typedef enum {
-    WTFileTypeImage          = 1,
-    WTFileTypeAudio ,
-    WTFileTypeVideo ,
-}WTFileType;
-
 #define File_Not_Exist   260
 
 #import <Foundation/Foundation.h>
 #import <Qiniu/QiniuSDK.h>
 #import <Qiniu/QNReachability.h>
+#import "WTWeddingStory.h"
 @class WTUploadManager;
 @protocol WTUploadDelegate <NSObject>
 - (void)uploadManager:(WTUploadManager *)uploadManager didFailedUpload:(NSError *)error;
@@ -43,10 +38,13 @@ typedef enum {
 @property (nonatomic, assign) id <WTUploadDelegate> delegate;
 
 + (instancetype)manager;
+
+//视频的断点续传
 - (BOOL)hasCache;
 - (void)resumeUploadCache;
 - (void)deleteCache;
 
-- (void)uploadFileWithBucket:(NSString *)bucket fileInfo:(id)filePathOrData fileType:(WTFileType)fileType ;
+//上传文件
+- (void)uploadFileWithFileInfo:(id)filePathOrData fileType:(WTFileType)fileType;
 
 @end

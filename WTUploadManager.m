@@ -9,7 +9,8 @@
 #import "WTUploadManager.h"
 #import "PostDataService.h"
 #import "GetService.h"
-
+#define kCombineString @"&&"
+#define kPathString         @"#"
 #define kReachabilityURL @"https://www.baidu.com"
 @interface  WTUploadManager()
 @property (nonatomic, copy) NSString *pathAndKey;
@@ -32,16 +33,7 @@
 {
     self = [super init];
     if(self){
-        self.fileRecord = [QNFileRecorder fileRecorderWithFolder:[self fileRecordPath] error:nil];
-        if(self.fileRecord){
-            self.uploadManager = [[QNUploadManager alloc] initWithRecorder:self.fileRecord recorderKeyGenerator:^NSString *(NSString *uploadKey, NSString *filePath) {
-                return [[NSString stringWithFormat:@"%@&&%@",filePath,uploadKey] stringByReplacingOccurrencesOfString:@"/" withString:@"#"];
-            }];
-        }
-        else{
-            self.uploadManager = [[QNUploadManager alloc] init];
-        }
-
+		self.fileRecord = [QNFileRecorder fileRecorderWithFolder:[self fileRecordPath] error:nil];
         self.reachebility = [QNReachability reachabilityWithHostName:APIHOST] ;
         self.uploadState = WTUploadStatueNone;
         self.isCancelUpload = NO;
@@ -51,7 +43,7 @@
     return self;
 }
 
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSString *,id> *)change context:(void *)context
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
     if([self.delegate respondsToSelector:@selector(uploadManager:didChangeUploadState:)]){
         [self.delegate uploadManager:self didChangeUploadState:(WTUploadStatue)[change[NSKeyValueChangeNewKey] integerValue]];
@@ -65,12 +57,14 @@
     return [cacheDir stringByAppendingString:@"/QiNiuCache"];
 }
 
+//判断是否有缓存
 - (BOOL)hasCache{
     NSMutableArray *files = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:[self fileRecordPath] error:nil] mutableCopy];
     [files removeObject:@".DS_Store"];
     return files.count > 0;
 }
 
+//上传缓存数据
 - (void)resumeUploadCache{
     self.uploadState = WTUploadStatueUploading;
     NSMutableArray *files = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:[self fileRecordPath] error:nil] mutableCopy];
@@ -80,12 +74,14 @@
         self.pathAndKey = files[0];
         self.filePath = atts[0];
         self.fileKey = atts[1];
-        [self uploadFileWithBucket:@"mt-video" fileInfo:self.filePath fileType:WTFileTypeVideo];
+        [self uploadFileWithFileInfo:self.filePath fileType:WTFileTypeVideo];
     }
 }
 
+//取消续传，删除本地缓存
 - (void)deleteCache{
     self.uploadState = WTUploadStatueCanceled;
+	self.fileKey = @"";
     NSMutableArray *files = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:[self fileRecordPath] error:nil] mutableCopy];
     [files removeObject:@".DS_Store"];
     if(files.count>0){
@@ -99,11 +95,23 @@
 }
 
 #pragma mark - Upload
-- (void)uploadFileWithBucket:(NSString *)bucket fileInfo:(id)filePathOrData fileType:(WTFileType)fileType
+- (void)uploadFileWithFileInfo:(id)fileInfo fileType:(WTFileType)fileType
 {
     self.isCancelUpload = NO;
     self.uploadState = WTUploadStatueUploading;
+	NSString *fileBucket = fileType == WTFileTypeImage ? @"mt-card" : @"mt-video";
     NSString *fileMIME = fileType == WTFileTypeImage ? @"image/jpeg" : @"video/quicktime";
+
+	//初始uploadManager video支持续传 ， image不支持续传
+	if([fileBucket isEqualToString:@"mt-video"]){
+		self.uploadManager = [[QNUploadManager alloc] initWithRecorder:self.fileRecord recorderKeyGenerator:^NSString *(NSString *uploadKey, NSString *filePath) {
+			return [[NSString stringWithFormat:@"%@%@%@",filePath,kCombineString,uploadKey] stringByReplacingOccurrencesOfString:@"/" withString:kPathString];
+		}];
+	}
+	else{
+		self.uploadManager = [[QNUploadManager alloc] init];
+	}
+
     //设置上传选项
     self.uploadOption = [[QNUploadOption alloc] initWithMime:fileMIME progressHandler:^(NSString *key, float percent) {
         if([self.delegate respondsToSelector:@selector(uploadManager:didChangeProgress:)]){
@@ -114,25 +122,38 @@
         return self.isCancelUpload;
     }];
     
-    [GetService getQiniuTokenWithBucket:bucket WithBlock:^(NSDictionary *result, NSError *error) {
+    [GetService getQiniuTokenWithBucket:fileBucket WithBlock:^(NSDictionary *result, NSError *error) {
         if(error){
             self.uploadState = WTUploadStatueFailed;
             if([self.delegate respondsToSelector:@selector(uploadManager:didFailedUpload:)]){
                 [self.delegate uploadManager:self didFailedUpload:error];
             }
         }else{
-            NSString *token = result[@"token"];
-            fileType == WTFileTypeImage ? [self uploadFileWIthData:(NSData *)filePathOrData andToken:(NSString *)token] : [self uploadFileWithPath:(NSString *)filePathOrData andToken:(NSString *)token];
+            NSString *token = result[@"uptoken"];
+			if([fileInfo isKindOfClass:[NSData class]]){
+				[self uploadFileWIthData:fileInfo andToken:token];
+			}else if([fileInfo isKindOfClass:[NSString class]]){
+				[self uploadFileWithPath:fileInfo andToken:token];
+			}if([fileInfo isKindOfClass:[ALAsset class]]){
+				[self uploadFileWithAsset:fileInfo andToken:token];
+			}
+			if([fileInfo isKindOfClass:[NSArray class]]){
+				[fileInfo enumerateObjectsUsingBlock:^(id   obj, NSUInteger idx, BOOL *  stop) {
+					ALAsset *asset = (ALAsset *)obj;
+					[self uploadFileWithAsset:asset andToken:token];
+				}];
+			}
         }
     }];
 }
 
+//上传Data类型数据
 - (void)uploadFileWIthData:(NSData *)data andToken:(NSString *)token
 {
     NSDateFormatter * dateFormatter = [[NSDateFormatter alloc] init];
     [dateFormatter setDateFormat:@"yyyy/MM/dd"];
     NSString * dateStr = [dateFormatter stringFromDate:[NSDate date]];
-    NSString *key = [NSString stringWithFormat:@"%@/%lu%@",dateStr,data.hash,[LWUtil randomStringWithLength:4]];
+    NSString *key = [NSString stringWithFormat:@"%@/%lu%@",dateStr,data.hash,[LWUtil randomStringWithLength:8]];
 
     [self.uploadManager putData:data key:key token:token complete:^(QNResponseInfo *info, NSString *key, NSDictionary *resp) {
         if(resp){
@@ -151,12 +172,13 @@
     } option:self.uploadOption];
 }
 
+//根据FilePath上传数据
 - (void)uploadFileWithPath:(NSString *)filePath andToken:(NSString *)token
 {
     NSDateFormatter * dateFormatter = [[NSDateFormatter alloc] init];
     [dateFormatter setDateFormat:@"yyyy/MM/dd"];
     NSString * dateStr = [dateFormatter stringFromDate:[NSDate date]];
-    NSString *akey =  [NSString stringWithFormat:@"%@/%lu%@",dateStr,filePath.hash,[LWUtil randomStringWithLength:4]];
+    NSString *akey =  [NSString stringWithFormat:@"%@/%lu%@",dateStr,filePath.hash,[LWUtil randomStringWithLength:8]];
     NSString *key = self.fileKey.length > 0 ? self.fileKey : akey ;
 
     [self.uploadManager putFile:filePath key:key token:token complete:^(QNResponseInfo *info, NSString *key, NSDictionary *resp) {
@@ -177,6 +199,32 @@
             }
         }
     } option:self.uploadOption];
+}
+
+//上传Assert类型数据
+- (void)uploadFileWithAsset:(ALAsset *)fileAsset andToken:(NSString *)token
+{
+	NSDateFormatter * dateFormatter = [[NSDateFormatter alloc] init];
+	[dateFormatter setDateFormat:@"yyyy/MM/dd"];
+	NSString * dateStr = [dateFormatter stringFromDate:[NSDate date]];
+	NSString *akey =  [NSString stringWithFormat:@"%@/%lu%@",dateStr,fileAsset.hash,[LWUtil randomStringWithLength:8]];
+	NSString *key = self.fileKey.length > 0 ? self.fileKey : akey ;
+
+	[self.uploadManager putALAsset:fileAsset key:key token:token complete:^(QNResponseInfo *info, NSString *key, NSDictionary *resp) {
+		if(resp){
+			self.uploadState = WTUploadStatueFinished;
+			if([self.delegate respondsToSelector:@selector(uploadManager:didFinishedUploadWithKey:)]){
+				[self.delegate uploadManager:self didFinishedUploadWithKey:key];
+			}
+		}else{
+			if(self.uploadState != WTUploadStatueCanceled){
+				self.uploadState = WTUploadStatueFailed;
+				if([self.delegate respondsToSelector:@selector(uploadManager:didFailedUpload:)]){
+					[self.delegate uploadManager:self didFailedUpload:nil];
+				}
+			}
+		}
+	} option:self.uploadOption];
 }
 
 - (void)dealloc
